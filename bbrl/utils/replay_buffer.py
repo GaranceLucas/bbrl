@@ -243,7 +243,6 @@ class PrioritizedReplayBuffer:
 
     # function which allows to get the batchs picked according to an Exponential distribution from the replay buffer (under the form of workspace)
     def get_prioritized(self, batch_size):
-        workspace = Workspace()
         temporal_differences = []
         batch = [0] * batch_size
 
@@ -262,12 +261,15 @@ class PrioritizedReplayBuffer:
 
         # batchs creation in order to writte them into the workspace
         for i in range(batch_size):
-            chosen_index = int(np.random.exponential(scale=self.lambda_exp, size=None))
-            while chosen_index > batch_size:
-                chosen_index = int(np.random.exponential(scale=self.lambda_exp, size=None))
+            chosen_index = int((-1 / self.lambda_exp) * np.log(
+                np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
+            while chosen_index > batch_size or chosen_index < 0:
+                chosen_index = int((-1 / self.lambda_exp) * np.log(
+                    np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
             batch[i] = tds[chosen_index]
 
         who = torch.tensor(batch)
+        who = who.long()
 
         workspace = Workspace()
         for k in self.variables:
