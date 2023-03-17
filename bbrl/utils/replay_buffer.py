@@ -259,10 +259,12 @@ class PrioritizedReplayBuffer:
         #get the sorted list according to the temporal differences and the indexes
         tds, indexes = torch.sort(torch.tensor(temporal_differences))
 
-        # batchs creation in order to writte them into the workspace
+        # create the batch to write into the workspace
+        # indexes are picked from the exponential distribution (shifted in order to pick with a higher probability the indexes with the highest temporal differences)
         for i in range(batch_size):
             chosen_index = int((-1 / self.lambda_exp) * np.log(
                 np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
+            # the index has to be between 0 and batch_size
             while chosen_index > batch_size or chosen_index < 0:
                 chosen_index = int((-1 / self.lambda_exp) * np.log(
                     np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
