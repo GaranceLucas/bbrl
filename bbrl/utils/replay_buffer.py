@@ -4,6 +4,7 @@
 
 import copy
 import torch
+import numpy as np
 
 from bbrl.workspace import Workspace
 
@@ -127,7 +128,7 @@ class PrioritizedReplayBuffer:
         self.position = 0
         self.is_full = False
         self.device = device
-        self.gamma = 0.9
+        self.beta = 0.9
         self.lambda_exp = 0.2
 
     def init_workspace(self, all_tensors):
@@ -141,7 +142,7 @@ class PrioritizedReplayBuffer:
             self.variables = {}
             for k, v in all_tensors.items():
                 # in order to solve the problem of the end of an episode and the beginning of another,
-                # we replace single step informations with transition informations
+                # we replace single step information with transition information
                 s = list(v.size())
                 s[1] = self.max_size
                 _s = copy.deepcopy(s)
@@ -153,8 +154,10 @@ class PrioritizedReplayBuffer:
             self.is_full = False
             self.position = 0
 
-    # function which insert the value v into the variable dictionnary of the replay buffer
     def _insert(self, k, indexes, v):
+        """
+        Inserts the value v into the variable dictionnary of the replay buffer
+        """
         self.variables[k][indexes] = v.detach().moveaxis((0, 1), (1, 0))
 
     def put(self, workspace):
@@ -219,19 +222,26 @@ class PrioritizedReplayBuffer:
                 arange = arange.to(dtype=torch.long, device=v.device)
                 self._insert(k, indexes, v)
 
-    # function which gives the size of the replay buffer
     def size(self):
+        """
+        Returns the size of the replay buffer
+        """
         if self.is_full:
             return self.max_size
         else:
             return self.position
 
-    # function which print the observations
     def print_obs(self):
+        """
+        Print the observation of the replay buffer at the current position
+        """
         print(f"position: {self.position}")
         print(self.variables["env/env_obs"])
 
     def get_shuffled(self, batch_size):
+        """
+        Returns a workspace with a batch of data randomly picked from the replay buffer
+        """
         who = torch.randint(
             low=0, high=self.size(), size=(batch_size,), device=self.device
         )
@@ -241,8 +251,10 @@ class PrioritizedReplayBuffer:
 
         return workspace
 
-    # function which allows to get the batchs picked according to an Exponential distribution from the replay buffer (under the form of workspace)
     def get_prioritized(self, batch_size):
+        """
+        Returns a workspace with a batch of data picked from the replay buffer according to an exponential distribution
+        """
         temporal_differences = []
         batch = [0] * batch_size
 
@@ -254,7 +266,7 @@ class PrioritizedReplayBuffer:
             q_value_next = self.variables['q_values'][k][1]
             action = self.variables['action'][k]
             temporal_differences.append(
-                reward + self.gamma * max(q_value_next) - q_value[action[0]])
+                reward + self.beta * max(q_value_next) - q_value[action[0]])
 
         #get the sorted list according to the temporal differences and the indexes
         tds, indexes = torch.sort(torch.tensor(temporal_differences))
@@ -286,19 +298,21 @@ class PrioritizedReplayBuffer:
 
 
 class ReplayBufferCounter:
-    def __init__(self, max_size, max_counter = 1, device=torch.device("cpu")):
-        self.max_size = int(max_size)
+    def __init__(self, max_size_buffer, max_counter = 1, max_size_used_samples = 200, device=torch.device("cpu")):
+        self.max_size_buffer = int(max_size_buffer)
         self.variables = None
         self.position = 0
         self.is_full = False
         self.device = device
         self.max_counter = max_counter
-        self.counter_list = [0]*max_size
+        self.counter_list = [0]*max_size_buffer
+        self.used_samples = []
+        self.max_size_used_samples = max_size_used_samples
 
     def init_workspace(self, all_tensors):
         """
         Create an array to stores workspace based on the given all_tensors keys.
-        shape of stores tensors : [key] => [self.max_size][time_size][key_dim]
+        shape of stores tensors : [key] => [self.max_size_buffer][time_size][key_dim]
         Makes a copy of the input content
         """
 
@@ -306,7 +320,7 @@ class ReplayBufferCounter:
             self.variables = {}
             for k, v in all_tensors.items():
                 s = list(v.size())
-                s[1] = self.max_size
+                s[1] = self.max_size_buffer
                 _s = copy.deepcopy(s)
                 s[0] = _s[1]
                 s[1] = _s[0]
@@ -317,6 +331,9 @@ class ReplayBufferCounter:
             self.position = 0
 
     def _insert(self, k, indexes, v):
+        """
+        Inserts the value v into the variable dictionnary of the replay buffer
+        """
         self.variables[k][indexes] = v.detach().moveaxis((0, 1), (1, 0))
 
     def update_counter(self, index):
@@ -325,23 +342,38 @@ class ReplayBufferCounter:
         If the counter reaches the max_counter, the sample is deleted from the replay buffer.
         """
         self.counter_list[index] += 1
+        # if the counter of the sample is equals to the max_counter, we add the sample to the list of
+        # used samples
         if self.counter_list[index] == self.max_counter:
-            self.delete(index)
+            for k in range(len(self.variables)):
+                self.used_samples.append(self.variables[k][index])
+            # if the number of used samples reach the maximum number, we create another replay buffer
+            # which does not contain the used samples
+            if len(self.used_samples) == self.max_size_used_samples:
+                self.new_buffer()
 
-    #function that deletes a sample from the replay buffer
-    def delete(self, index):
+    def new_buffer(self):
         """
-        Delete the sample at the given index in the replay buffer by setting it to zeros.
+        Create another replay buffer from the old replay buffer, without containing the used samples.
         """
-        for k in self.variables:
-            self.variables[k][index] = torch.zeros_like(self.variables[k][index])
+        samples_list = []
+        # samples_list contains the samples which does not have their counter equals to max_counter
+        for k in range(len(self.variables)):
+            for j in range(len(self.variables[k])):
+                if self.counter_list[self.variables[k][j]] != self.max_counter:
+                    samples_list.append(self.variables[k][j])
+        # creation of the new replay buffer
+        new_buffer_size = self.max_size_buffer - self.max_size_used_samples
+        ReplayBufferCounter(new_buffer_size, self.max_counter, self.max_size_used_samples, self.device)
+        # insertion of the samples in the new replay buffer
+        for s in samples_list:
+            self.put(s)
 
     def put(self, workspace):
         """
-        Add a the content of a workspace to the replay buffer.
+        Add the content of a workspace to the replay buffer.
         The given workspace must have keys of shape : [time_size][batch_size][key_dim]
         """
-
         new_data = {
             k: workspace.get_full(k).detach().to(self.device) for k in workspace.keys()
         }
@@ -356,7 +388,7 @@ class ReplayBufferCounter:
                 batch_size = v.size()[1]
                 # print(f"{k}: batch size : {batch_size}")
                 # print("pos", self.position)
-            if self.position + batch_size < self.max_size:
+            if self.position + batch_size < self.max_size_buffer:
                 # The case where the batch can be inserted before the end of the replay buffer
                 if indexes is None:
                     indexes = torch.arange(batch_size) + self.position
@@ -372,7 +404,7 @@ class ReplayBufferCounter:
                 # A part is at the end, the other part is in the beginning
                 self.is_full = True
                 # the number of data at the end of the RB
-                batch_end_size = self.max_size - self.position
+                batch_end_size = self.max_size_buffer - self.position
                 # the number of data at the beginning of the RB
                 batch_begin_size = batch_size - batch_end_size
                 if indexes is None:
@@ -392,20 +424,31 @@ class ReplayBufferCounter:
                 self._insert(k, indexes, v)
 
     def size(self):
+        """
+        Returns the size of the replay buffer
+        """
         if self.is_full:
-            return self.max_size
+            return self.max_size_buffer
         else:
             return self.position
 
     def print_obs(self):
+        """
+        Print the observation of the replay buffer at the current position
+        """
         print(f"position: {self.position}")
         print(self.variables["env/env_obs"])
 
     def get_shuffled(self, batch_size):
+        """
+        Returns a workspace with a batch of data randomly picked from the replay buffer.
+        Takes care to do not pick a sample which have its counter equals to the max_counter.
+        """
         who = torch.randint(
             low=0, high=self.size(), size=(batch_size,), device=self.device
         )
 
+        # while we pick a sample which have its counter equals to the max_counter, we pick again another sample
         while self.counter_list[who] == self.max_counter:
             who = torch.randint(
                 low=0, high=self.size(), size=(batch_size,), device=self.device
