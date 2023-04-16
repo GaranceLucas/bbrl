@@ -121,8 +121,8 @@ class ReplayBuffer:
         self.variables = n_vars
 
 
-class PrioritizedReplayBuffer:
-    def __init__(self, max_size, device=torch.device("cpu")):
+class PrioritizedExperienceReplay:
+    def __init__(self, max_size, tau = 4, device=torch.device("cpu")):
         self.max_size = int(max_size)
         self.variables = None
         self.position = 0
@@ -130,6 +130,7 @@ class PrioritizedReplayBuffer:
         self.device = device
         self.gamma = 0.9
         self.lambda_exp = 0.2
+        self.tau = tau
 
     def init_workspace(self, all_tensors):
         """
@@ -256,7 +257,7 @@ class PrioritizedReplayBuffer:
         Returns a workspace with a batch of data picked from the replay buffer according to an exponential distribution
         """
         temporal_differences = []
-        batch = [0] * batch_size
+        batch_list = [[0] * batch_size/self.tau]*self.tau
 
         # compute the temporal differences for all the samples
         for k in range(len(self.variables['env/reward'])):
@@ -273,23 +274,27 @@ class PrioritizedReplayBuffer:
 
         # create the batch to write into the workspace
         # indexes are picked from the exponential distribution (shifted in order to pick with a higher probability the indexes with the highest temporal differences)
-        for i in range(batch_size):
-            chosen_index = int((-1 / self.lambda_exp) * np.log(
-                np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
-            # the index has to be between 0 and batch_size
-            while chosen_index > batch_size or chosen_index < 0:
+        for i in range(self.tau):
+            for j in range(batch_size/self.tau):
                 chosen_index = int((-1 / self.lambda_exp) * np.log(
                     np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
-            batch[i] = tds[chosen_index]
+                # the index has to be between 0 and batch_size
+                while chosen_index > batch_size or chosen_index < 0:
+                    chosen_index = int((-1 / self.lambda_exp) * np.log(
+                        np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
+                batch_list[i][j] = tds[chosen_index]
 
-        who = torch.tensor(batch)
-        who = who.long()
+        workspace_list = []
 
-        workspace = Workspace()
-        for k in self.variables:
-            workspace.set_full(k, self.variables[k][who].transpose(0, 1))
+        for i in range(self.tau):
+            who = torch.tensor(batch_list[i])
+            who = who.long()
+            workspace = Workspace()
+            for k in self.variables:
+                workspace.set_full(k, self.variables[k][who].transpose(0, 1))
+            workspace_list.append(workspace)
 
-        return workspace
+        return workspace_list
 
     def to(self, device):
         n_vars = {k: v.to(device) for k, v in self.variables.items()}
