@@ -128,7 +128,7 @@ class PrioritizedReplayBuffer:
         self.position = 0
         self.is_full = False
         self.device = device
-        self.beta = 0.9
+        self.gamma = 0.9
         self.lambda_exp = 0.2
 
     def init_workspace(self, all_tensors):
@@ -266,7 +266,7 @@ class PrioritizedReplayBuffer:
             q_value_next = self.variables['q_values'][k][1]
             action = self.variables['action'][k]
             temporal_differences.append(
-                reward + self.beta * max(q_value_next) - q_value[action[0]])
+                reward + self.gamma * max(q_value_next) - q_value[action[0]])
 
         #get the sorted list according to the temporal differences and the indexes
         tds, indexes = torch.sort(torch.tensor(temporal_differences))
