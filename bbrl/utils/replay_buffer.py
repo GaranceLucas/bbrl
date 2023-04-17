@@ -122,7 +122,7 @@ class ReplayBuffer:
 
 
 class PrioritizedExperienceReplay:
-    def __init__(self, max_size, tau = 4, device=torch.device("cpu")):
+    def __init__(self, max_size, device=torch.device("cpu")):
         self.max_size = int(max_size)
         self.variables = None
         self.position = 0
@@ -130,7 +130,6 @@ class PrioritizedExperienceReplay:
         self.device = device
         self.gamma = 0.9
         self.lambda_exp = 0.2
-        self.tau = tau
 
     def init_workspace(self, all_tensors):
         """
@@ -257,7 +256,7 @@ class PrioritizedExperienceReplay:
         Returns a workspace with a batch of data picked from the replay buffer according to an exponential distribution
         """
         temporal_differences = []
-        batch_list = [[0] * batch_size/self.tau]*self.tau
+        batch = [0] * batch_size
 
         # compute the temporal differences for all the samples
         for k in range(len(self.variables['env/reward'])):
@@ -274,27 +273,23 @@ class PrioritizedExperienceReplay:
 
         # create the batch to write into the workspace
         # indexes are picked from the exponential distribution (shifted in order to pick with a higher probability the indexes with the highest temporal differences)
-        for i in range(self.tau):
-            for j in range(batch_size/self.tau):
+        for j in range(batch_size):
+            chosen_index = int((-1 / self.lambda_exp) * np.log(
+                np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
+            # the index has to be between 0 and batch_size
+            while chosen_index > batch_size or chosen_index < 0:
                 chosen_index = int((-1 / self.lambda_exp) * np.log(
                     np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
-                # the index has to be between 0 and batch_size
-                while chosen_index > batch_size or chosen_index < 0:
-                    chosen_index = int((-1 / self.lambda_exp) * np.log(
-                        np.random.exponential(scale=self.lambda_exp, size=None) * (1 / self.lambda_exp)))
-                batch_list[i][j] = tds[chosen_index]
+            batch[j] = tds[chosen_index]
 
-        workspace_list = []
+        who = torch.tensor(batch)
+        who = who.long()
+        workspace = Workspace()
+        for k in self.variables:
+            workspace.set_full(k, self.variables[k][who].transpose(0, 1))
 
-        for i in range(self.tau):
-            who = torch.tensor(batch_list[i])
-            who = who.long()
-            workspace = Workspace()
-            for k in self.variables:
-                workspace.set_full(k, self.variables[k][who].transpose(0, 1))
-            workspace_list.append(workspace)
 
-        return workspace_list
+        return workspace
 
     def to(self, device):
         n_vars = {k: v.to(device) for k, v in self.variables.items()}
@@ -303,16 +298,17 @@ class PrioritizedExperienceReplay:
 
 
 class ReplayBufferCounter:
-    def __init__(self, max_size_buffer, max_counter = 1, max_size_used_samples = 200, device=torch.device("cpu")):
+    def __init__(self, max_size_buffer, max_counter = 1, max_size_used_samples = 200, tau = 4, device=torch.device("cpu")):
         self.max_size_buffer = int(max_size_buffer)
         self.variables = None
         self.position = 0
         self.is_full = False
         self.device = device
-        self.max_counter = max_counter
+        self.max_counter = max_counter   # maximum number of time a sample can be used for learning
         self.counter_list = [0]*max_size_buffer
-        self.used_samples = []
-        self.max_size_used_samples = max_size_used_samples
+        self.used_samples = []   # list of used samples (for which the counter = max_counter)
+        self.max_size_used_samples = max_size_used_samples   # maximum number of used samples allowed in the buffer
+        self.tau = tau   # amount of replay per step
 
     def init_workspace(self, all_tensors):
         """
@@ -341,21 +337,22 @@ class ReplayBufferCounter:
         """
         self.variables[k][indexes] = v.detach().moveaxis((0, 1), (1, 0))
 
-    def update_counter(self, index):
+    def update_counter(self, index_list):
         """
         Update the counter of the sample at the given index in the replay buffer.
         If the counter reaches the max_counter, the sample is deleted from the replay buffer.
         """
-        self.counter_list[index] += 1
-        # if the counter of the sample is equals to the max_counter, we add the sample to the list of
-        # used samples
-        if self.counter_list[index] == self.max_counter:
-            for k in range(len(self.variables)):
-                self.used_samples.append(self.variables[k][index])
-            # if the number of used samples reach the maximum number, we create another replay buffer
-            # which does not contain the used samples
-            if len(self.used_samples) == self.max_size_used_samples:
-                self.new_buffer()
+        for index in index_list:
+            self.counter_list[index] += 1
+            # if the counter of the sample is equals to the max_counter, we add the sample to the list of
+            # used samples
+            if self.counter_list[index] == self.max_counter:
+                for k in range(len(self.variables)):
+                    self.used_samples.append(self.variables[k][index])
+                # if the number of used samples reach the maximum number, we create another replay buffer
+                # which does not contain the used samples
+                if len(self.used_samples) == self.max_size_used_samples:
+                    self.new_buffer()
 
     def new_buffer(self):
         """
@@ -449,21 +446,26 @@ class ReplayBufferCounter:
         Returns a workspace with a batch of data randomly picked from the replay buffer.
         Takes care to do not pick a sample which have its counter equals to the max_counter.
         """
-        who = torch.randint(
-            low=0, high=self.size(), size=(batch_size,), device=self.device
-        )
+        batch_list = [[0] * batch_size / self.tau] * self.tau
 
-        # while we pick a sample which have its counter equals to the max_counter, we pick again another sample
-        while self.counter_list[who] == self.max_counter:
-            who = torch.randint(
-                low=0, high=self.size(), size=(batch_size,), device=self.device
-            )
+        for i in range(self.tau):
+            who = torch.randint(low=0, high=self.size(), size=(batch_size/self.tau,), device=self.device)
+            # while we pick a sample which have its counter equals to the max_counter, we pick again another sample
+            while self.counter[who] == self.max_counter:
+                who = torch.randint(low=0, high=self.size(), size=(batch_size/self.tau,), device=self.device)
+            batch_list[i]=who
 
-        workspace = Workspace()
-        for k in self.variables:
-            workspace.set_full(k, self.variables[k][who].transpose(0, 1))
-        self.update_counter(who)
-        return workspace
+        workspace_list = []
+
+        for i in range(len(batch_list)):
+            workspace = Workspace()
+            w = batch_list[i]
+            for k in self.variables:
+                workspace.set_full(k, self.variables[k][w].transpose(0, 1))
+            self.update_counter(w)
+            workspace_list.append(workspace)
+
+        return workspace_list
 
     def to(self, device):
         n_vars = {k: v.to(device) for k, v in self.variables.items()}
