@@ -298,7 +298,7 @@ class PrioritizedExperienceReplay:
 
 
 class ReplayBufferCounter:
-    def __init__(self, max_size_buffer, max_counter = 1, max_size_used_samples = 200, tau = 4, device=torch.device("cpu")):
+    def __init__(self, max_size_buffer, max_counter = 1, max_size_used_samples = 200, tau = 4, replacement = True, device=torch.device("cpu")):
         self.max_size_buffer = int(max_size_buffer)
         self.variables = None
         self.position = 0
@@ -309,6 +309,7 @@ class ReplayBufferCounter:
         self.used_samples = []   # list of used samples (for which the counter = max_counter)
         self.max_size_used_samples = max_size_used_samples   # maximum number of used samples allowed in the buffer
         self.tau = tau   # amount of replay per step
+        self.replacement = replacement   # if the draw of sample in the batchs is with replacement or not
 
     def init_workspace(self, all_tensors):
         """
@@ -335,6 +336,11 @@ class ReplayBufferCounter:
         """
         Inserts the value v into the variable dictionnary of the replay buffer
         """
+        print('k',k)
+        print('indexes', indexes)
+        print('variable k', self.variables[k])
+        print('len indexes', len(indexes))
+        print('len variables k', len(self.variables[k]))
         self.variables[k][indexes] = v.detach().moveaxis((0, 1), (1, 0))
 
     def update_counter(self, index_list):
@@ -347,7 +353,7 @@ class ReplayBufferCounter:
             # if the counter of the sample is equals to the max_counter, we add the sample to the list of
             # used samples
             if self.counter_list[index] == self.max_counter:
-                for k in range(len(self.variables)):
+                for k in self.variables.keys():
                     self.used_samples.append(self.variables[k][index])
                 # if the number of used samples reach the maximum number, we create another replay buffer
                 # which does not contain the used samples
@@ -366,7 +372,7 @@ class ReplayBufferCounter:
                     samples_list.append(self.variables[k][j])
         # creation of the new replay buffer
         new_buffer_size = self.max_size_buffer - self.max_size_used_samples
-        ReplayBufferCounter(new_buffer_size, self.max_counter, self.max_size_used_samples, self.device)
+        ReplayBufferCounter(new_buffer_size, self.max_counter, self.max_size_used_samples, self.tau, self.replacement, self.device)
         # insertion of the samples in the new replay buffer
         for s in samples_list:
             self.put(s)
@@ -446,13 +452,29 @@ class ReplayBufferCounter:
         Returns a workspace with a batch of data randomly picked from the replay buffer.
         Takes care to do not pick a sample which have its counter equals to the max_counter.
         """
-        batch_list = [[0] * batch_size / self.tau] * self.tau
+        d = int(batch_size/self.tau)
+        batch_list = [[0] * d] * self.tau
 
         for i in range(self.tau):
-            who = torch.randint(low=0, high=self.size(), size=(batch_size/self.tau,), device=self.device)
-            # while we pick a sample which have its counter equals to the max_counter, we pick again another sample
-            while self.counter[who] == self.max_counter:
-                who = torch.randint(low=0, high=self.size(), size=(batch_size/self.tau,), device=self.device)
+            if self.replacement == True:
+                listWho = []
+                # while we pick a sample which have its counter equals to the max_counter, we pick again another sample
+                for j in range(d):
+                    who=torch.randint(low=0, high=self.size(), size=(1,), device=self.device)
+                    while self.counter_list[who] == self.max_counter :
+                        who= torch.randint(low=0, high=self.size(), size=(1,), device=self.device)
+                    listWho.append(who)
+
+            else:
+                x = [i for i in range(self.size())]
+                who = np.random.choice(x, size=(d,), replace=False)
+                # while we pick a sample which have its counter equals to the max_counter, we pick again another sample
+                for s in range(len(who)):
+                    while self.counter_list[who[s]] == self.max_counter:
+                        who[s] = torch.randint(low=0, high=self.size(), size=(1,), device=self.device)
+                        # while we pick again a sample which is already in the batch, we pick another one as the parameter replacement is set to False
+                        while who[s] in who:
+                            who[s] = torch.randint(low=0, high=self.size(), size=(1,), device=self.device)
             batch_list[i]=who
 
         workspace_list = []
@@ -470,4 +492,3 @@ class ReplayBufferCounter:
     def to(self, device):
         n_vars = {k: v.to(device) for k, v in self.variables.items()}
         self.variables = n_vars
-
