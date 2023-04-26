@@ -336,11 +336,6 @@ class ReplayBufferCounter:
         """
         Inserts the value v into the variable dictionnary of the replay buffer
         """
-        print('k',k)
-        print('indexes', indexes)
-        print('variable k', self.variables[k])
-        print('len indexes', len(indexes))
-        print('len variables k', len(self.variables[k]))
         self.variables[k][indexes] = v.detach().moveaxis((0, 1), (1, 0))
 
     def update_counter(self, index_list):
@@ -357,24 +352,27 @@ class ReplayBufferCounter:
                     self.used_samples.append(self.variables[k][index])
                 # if the number of used samples reach the maximum number, we create another replay buffer
                 # which does not contain the used samples
-                if len(self.used_samples) == self.max_size_used_samples:
+                if len(self.used_samples) >= self.max_size_used_samples:
                     self.new_buffer()
 
     def new_buffer(self):
         """
         Create another replay buffer from the old replay buffer, without containing the used samples.
         """
-        samples_list = []
-        # samples_list contains the samples which does not have their counter equals to max_counter
-        for k in range(len(self.variables)):
-            for j in range(len(self.variables[k])):
-                if self.counter_list[self.variables[k][j]] != self.max_counter:
-                    samples_list.append(self.variables[k][j])
+        # initialisation of the future dictionnary of samples that will be in the new replay buffer
+        samples = copy.deepcopy(self.variables)
+        for i in range(len(samples.keys())):
+            samples[i] = []
+        # samples contains the samples which does not have their counter equals to max_counter
+        for j in range(len(self.variables['env/env_obs'])):
+            if self.counter_list[j] != self.max_counter:
+                for k in self.variables.keys():
+                    samples[k]=self.variables[k][j]
         # creation of the new replay buffer
         new_buffer_size = self.max_size_buffer - self.max_size_used_samples
         ReplayBufferCounter(new_buffer_size, self.max_counter, self.max_size_used_samples, self.tau, self.replacement, self.device)
         # insertion of the samples in the new replay buffer
-        for s in samples_list:
+        for s in samples:
             self.put(s)
 
     def put(self, workspace):
